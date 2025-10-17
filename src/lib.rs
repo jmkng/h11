@@ -3,6 +3,9 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
+const CONTENT_LENGTH: &str = "Content-Length";
+const TRANSFER_ENCODING: &str = "Transfer-Encoding";
+
 /// HTTP method.
 /// Parse one from a string with respect to RFC9112 by using
 /// [FromStr].
@@ -274,10 +277,8 @@ impl RequestBuilder {
 
             self.request_state = match self.request_state {
                 RequestState::Line => self.parse_request_line(line)?,
-                RequestState::Headers(headers_len_bytes) => {
-                    self.try_read_headers(line, headers_len_bytes)?
-                }
-                RequestState::Body(body_len_bytes) => self.try_read_body()?,
+                RequestState::Headers(headers_len) => self.read_header(line, headers_len)?,
+                RequestState::Body(body_len) => self.try_read_body()?,
                 RequestState::Done => unreachable!(), // Handled at start of `read_data` above.
             }
         }
@@ -314,7 +315,7 @@ impl RequestBuilder {
     }
 
     #[rustfmt::skip]
-    fn try_read_headers(&mut self, line: String, current_headers_len: usize) -> Result<RequestState, ReadError> {
+    fn read_header(&mut self, line: String, current_headers_len: usize) -> Result<RequestState, ReadError> {
         if line.is_empty() {
             // At this point, no more headers will be read.
             // This is a good time to enforce certain requirements, such as:
@@ -355,16 +356,16 @@ impl RequestBuilder {
         if split_iter.next().is_some() || name.is_none() || value.is_none() {
             return Err(ReadError::MalformedHeader);
         }
-        let name = name.unwrap();
-        let value = value.unwrap();
+        let name = name.unwrap().trim(); // Trim whitespace for name/value here.
+        let value = value.unwrap().trim();
+
 
         // Check for significant headers.
-        if name.eq_ignore_ascii_case("content-type") {
+        if name.eq_ignore_ascii_case(CONTENT_LENGTH) {
             let content_length: usize = value.parse().map_err(|err| ReadError::MalformedHeader)?;
             self.body_state = BodyState::ContentLength(content_length)
-        } else if name.eq_ignore_ascii_case("transfer-encoding") {
-            let coding: TransferCoding = FromStr::from_str(value)?;
-            self.body_state = BodyState::TransferEncoding(coding)
+        } else if name.eq_ignore_ascii_case(TRANSFER_ENCODING) {
+            self.body_state = BodyState::TransferEncoding(FromStr::from_str(value)?)
         }
         if name.eq_ignore_ascii_case("host") {
             self.has_host_header = true;
@@ -463,7 +464,10 @@ mod tests {
         }
 
         assert!(request_builder.read_data(b"\r\n").is_ok());
-        assert!(matches!(request_builder.request_state, RequestState::Headers(0)));
+        assert!(matches!(
+            request_builder.request_state,
+            RequestState::Headers(0)
+        ));
     }
 
     #[test]
@@ -480,7 +484,10 @@ mod tests {
                 .expect(&format!("Failed at chunk {}", i));
         }
 
-        if !matches!(request_builder.request_state, RequestState::Headers(chunks_len)) {
+        if !matches!(
+            request_builder.request_state,
+            RequestState::Headers(chunks_len)
+        ) {
             panic!("unexpected state: {:?}", request_builder.request_state);
         }
 
@@ -598,9 +605,33 @@ mod tests {
         }
     }
 
-    // TODO:
-    //      Test for content-length
-    //      Test for transfer-encoding
-    //      Don't store whitespace around header name/values.
-    //      Handle header name/value cases and whitespace trimming
+    #[test]
+    fn parse_content_length() {
+        let mut request_builder = RequestBuilder::default();
+        request_builder.request_state = RequestState::Headers(0);
+
+        if let Err(error) = request_builder.read_data(format!("{}: 300\r\n", CONTENT_LENGTH).as_bytes())
+        {
+            panic!("unexpected error: {:?}", error);
+        }
+        assert!(matches!(
+            request_builder.body_state,
+            BodyState::ContentLength(300)
+        ));
+    }
+
+    #[test]
+    fn parse_transfer_encoding() {
+        let mut request_builder = RequestBuilder::default();
+        request_builder.request_state = RequestState::Headers(0);
+        assert!(
+            request_builder
+                .read_data(format!("{}: chunked\r\n", TRANSFER_ENCODING).as_bytes())
+                .is_ok()
+        );
+        assert!(matches!(
+            request_builder.body_state,
+            BodyState::TransferEncoding(TransferCoding::Chunked)
+        ));
+    }
 }
