@@ -251,16 +251,6 @@ pub struct Headers {
     pub other: HashMap<header::Name, Vec<header::Value>>,
 }
 
-impl Headers {
-    pub fn get(&self, key: &str) -> Option<&Vec<header::Value>> {
-        self.other.get(key)
-    }
-
-    pub fn get_mut(&mut self, key: &str) -> Option<&mut Vec<header::Value>> {
-        self.other.get_mut(key)
-    }
-}
-
 /// A fully formed request header containing the request line and headers.
 /// Provides additional methods to interact with the request body.
 pub struct Request {
