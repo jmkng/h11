@@ -694,13 +694,12 @@ mod header_parsing {
 
     #[test]
     fn reject_non_ascii_bytes() {
-        let chunks = ["GET /abc/🤡/def HTTP/1.1"];
+        let chunks = ["GET /abc/🤡/def HTTP/1.1\r\n"];
         let mut parser = Parser::default();
-        assert!(
-            parser
-                .read_data(chunks.get(0).unwrap().as_bytes())
-                .is_err_and(|err| matches!(err, Error::ReceivedNonAsciiBytes))
-        );
+        let ok = parser
+            .read_data(chunks.get(0).unwrap().as_bytes())
+            .is_err_and(|err| matches!(err, Error::ReceivedNonAsciiBytes));
+        assert!(ok);
     }
 
     #[test]
