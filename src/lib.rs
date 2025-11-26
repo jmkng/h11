@@ -22,8 +22,7 @@ pub mod header {
     pub const HOST: &str = "Host";
 
     /// Header name.
-    /// This type has a case-insensitive [PartialEq] implementation.
-    #[derive(Hash)]
+    /// This type has case-insensitive [PartialEq] and [Hash] implementations.
     pub struct Name(pub String);
 
     impl PartialEq for Name {
@@ -33,6 +32,14 @@ pub mod header {
     }
 
     impl Eq for Name {}
+
+    impl Hash for Name {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            for b in self.0.bytes() {
+                state.write_u8(b.to_ascii_lowercase());
+            }
+        }
+    }
 
     impl Borrow<str> for Name {
         fn borrow(&self) -> &str {
