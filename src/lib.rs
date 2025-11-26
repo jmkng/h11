@@ -49,6 +49,43 @@ pub mod header {
 
     /// Header value.
     pub struct Value(pub String);
+
+    #[cfg(test)]
+    mod tests {
+        use super::Name;
+        use std::collections::HashMap;
+
+        #[test]
+        fn equal_keys_with_different_case_match() {
+            let mut map = HashMap::new();
+            map.insert(Name("Content-Type".into()), "json");
+
+            assert_eq!(map.get(&Name("content-type".into())), Some(&"json"));
+            assert_eq!(map.get(&Name("CONTENT-TYPE".into())), Some(&"json"));
+        }
+
+        #[test]
+        fn different_header_names_do_not_collide() {
+            let mut map = HashMap::new();
+            map.insert(Name("Host".into()), "example.com");
+            map.insert(Name("Accept".into()), "text/html");
+
+            assert_eq!(map.get(&Name("host".into())), Some(&"example.com"));
+            assert_eq!(map.get(&Name("accept".into())), Some(&"text/html"));
+        }
+
+        #[test]
+        fn overwriting_value_uses_case_insensitive_match() {
+            let mut map = HashMap::new();
+            map.insert(Name("Host".into()), "one");
+            map.insert(Name("HOST".into()), "two");
+
+            // Expected behavior, although the [Parser] will generally check for existing keys
+            // and append the new value instead.
+            assert_eq!(map.len(), 1);
+            assert_eq!(map.get(&Name("host".into())), Some(&"two"));
+        }
+    }
 }
 
 /// HTTP method.
