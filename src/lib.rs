@@ -247,7 +247,6 @@ pub struct Headers {
     content_length: Option<i64>,
 
     /// All other headers are stored here.
-    /// TODO: Ensure all lookups are case-insensitive.
     pub other: HashMap<header::Name, Vec<header::Value>>,
 }
 
@@ -281,9 +280,15 @@ impl TryFrom<Parser> for Request {
 #[derive(Debug)]
 pub enum Next {
     /// The parser expects to receive more data.
+    /// Continue reading data from your I/O source and calling [Parser::read_data]
+    /// until it returns [Next::Done].
     Receive,
-    /// The request line and headers have been read.
-    /// The [Vec<u8>] contains any portion of the body that was read into the parser.
+    /// Indicates that the request line and all headers have been read.
+    /// The work of the [Parser] is done.
+    /// The contained [Vec<u8>], assuming it is not empty, is the portion of the request body
+    /// that was given to the parser.
+    /// The caller may wish to take ownership of this data and provide some interface
+    /// for reading the request body.
     Done(Vec<u8>),
 }
 
@@ -359,19 +364,9 @@ impl Parser {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
-
         match self.state {
             State::Done => return Err(Error::Done),
             _ => {}
-        }
-
-        // "A recipient MUST parse an HTTP message ... in an encoding that is a superset
-        // of US-ASCII. Parsing an HTTP message as a stream of Unicode characters ...
-        // creates security vulnerabilities."
-        //
-        // https://datatracker.ietf.org/doc/html/rfc9112#section-2.2-2
-        if !data.is_ascii() {
-            return Err(Error::ReceivedNonAsciiBytes);
         }
 
         self.data.extend_from_slice(data);
@@ -392,9 +387,7 @@ impl Parser {
                 _ => unreachable!(), // Checked above.
             };
             match result {
-                Ok(state) => {
-                    self.state = state;
-                }
+                Ok(state) => self.state = state,
                 Err(error) => {
                     self.error = Some(error.clone());
                     return Err(error);
@@ -435,6 +428,15 @@ impl Parser {
             return Ok(State::Line);
         }
 
+        // "A recipient MUST parse an HTTP message ... in an encoding that is a superset
+        // of US-ASCII. Parsing an HTTP message as a stream of Unicode characters ...
+        // creates security vulnerabilities."
+        //
+        // https://datatracker.ietf.org/doc/html/rfc9112#section-2.2-2
+        if !line.is_ascii() {
+            return Err(Error::ReceivedNonAsciiBytes);
+        }
+
         // Parse the line.
         // Do not use `split_whitespace` or similar because that splits on
         // "any amount" of whitespace, which is allowed by the spec but can be a security vulnerability.
@@ -457,13 +459,22 @@ impl Parser {
             //
             // 1. "A client MUST send a Host header field in all HTTP/1.1 request messages."
             //    https://datatracker.ietf.org/doc/html/rfc9112#section-3.2-5
-            if state.get(header::HOST).is_none() {
+            if state.other.get(header::HOST).is_none() {
                 return Err(Error::MissingHost);
             }
             // TODO: Authority of request line target (if any) must match Host ^.
             // https://datatracker.ietf.org/doc/html/rfc9112#section-3.2-5
             // https://datatracker.ietf.org/doc/html/rfc9112#section-3.2-6
             return Ok(State::Done);
+        }
+
+        // "A recipient MUST parse an HTTP message ... in an encoding that is a superset
+        // of US-ASCII. Parsing an HTTP message as a stream of Unicode characters ...
+        // creates security vulnerabilities."
+        //
+        // https://datatracker.ietf.org/doc/html/rfc9112#section-2.2-2
+        if !line.is_ascii() {
+            return Err(Error::ReceivedNonAsciiBytes);
         }
 
         // A recipient that receives whitespace between the start-line and the first header
@@ -775,6 +786,7 @@ impl<'data> Iterator for Lines<'data> {
 
 /// This contains a slice of bytes representing a fully formed HTTP/1.1 line,
 /// with the trailing \r\n NOT included.
+/// No particular encoding should be assumed.
 #[derive(PartialEq, Debug)]
 struct Line<'data>(&'data [u8]);
 
@@ -789,11 +801,11 @@ impl<'data> Line<'data> {
     pub fn len(&self) -> usize {
         return self.0.len() + 2;
     }
-
-    /// Return the line as &str.
-    pub fn as_str(&self) -> &str {
-        unsafe { std::str::from_utf8_unchecked(self.0) }
-    }
+    //
+    // /// Return the line as &str.
+    // pub fn as_str(&self) -> &str {
+    //     unsafe { std::str::from_utf8_unchecked(self.0) }
+    // }
 }
 
 impl<'data> Deref for Line<'data> {
