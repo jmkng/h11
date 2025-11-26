@@ -444,7 +444,8 @@ impl Parser {
         let line_parts: [Range; 3] = split_request_line(&line)?;
 
         state.method = line[line_parts[0].start..line_parts[0].end].try_into()?;
-        state.target = Target(unsafe { std::str::from_utf8_unchecked(&self.data[line_parts[1].start..line_parts[1].end]) }.to_string());
+        // SAFETY: Checked for ascii above.
+        state.target = Target(unsafe { std::str::from_utf8_unchecked(&line[line_parts[1].start..line_parts[1].end]) }.to_string());
         state.version = line[line_parts[2].start..line_parts[2].end].try_into()?;
         Ok(State::Headers)
     }
