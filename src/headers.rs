@@ -3,8 +3,6 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::LazyLock;
 
-struct HeaderSet(HashSet<&'static str>);
-
 macro_rules! well_known {
     ($( $ident:ident => $value:expr ),* $(,)?) => {
         $(pub const $ident: &'static str = $value;)*
