@@ -1,92 +1,8 @@
 #![allow(warnings)]
-mod server;
+mod headers;
+pub mod server;
 
-use header::*;
 use std::{collections::HashMap, ops::Deref};
-
-pub mod header {
-    use std::borrow::Borrow;
-    use std::hash::{Hash, Hasher};
-
-    /// Case-insensitive comparison.
-    pub fn eq<A, B>(a: &A, b: &B) -> bool
-    where
-        A: AsRef<[u8]> + ?Sized,
-        B: AsRef<[u8]> + ?Sized,
-    {
-        a.as_ref().eq_ignore_ascii_case(b.as_ref())
-    }
-
-    pub const CONTENT_LENGTH: &str = "Content-Length";
-    pub const TRANSFER_ENCODING: &str = "Transfer-Encoding";
-    pub const HOST: &str = "Host";
-
-    /// Header name.
-    /// This type has case-insensitive [PartialEq] and [Hash] implementations.
-    pub struct Name(pub String);
-
-    impl PartialEq for Name {
-        fn eq(&self, other: &Self) -> bool {
-            self.0.eq_ignore_ascii_case(&other.0)
-        }
-    }
-
-    impl Eq for Name {}
-
-    impl Hash for Name {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            for b in self.0.bytes() {
-                state.write_u8(b.to_ascii_lowercase());
-            }
-        }
-    }
-
-    impl Borrow<str> for Name {
-        fn borrow(&self) -> &str {
-            &self.0
-        }
-    }
-
-    /// Header value.
-    pub struct Value(pub String);
-
-    #[cfg(test)]
-    mod tests {
-        use super::Name;
-        use std::collections::HashMap;
-
-        #[test]
-        fn equal_keys_with_different_case_match() {
-            let mut map = HashMap::new();
-            map.insert(Name("Content-Type".into()), "json");
-
-            assert_eq!(map.get(&Name("content-type".into())), Some(&"json"));
-            assert_eq!(map.get(&Name("CONTENT-TYPE".into())), Some(&"json"));
-        }
-
-        #[test]
-        fn different_header_names_do_not_collide() {
-            let mut map = HashMap::new();
-            map.insert(Name("Host".into()), "example.com");
-            map.insert(Name("Accept".into()), "text/html");
-
-            assert_eq!(map.get(&Name("host".into())), Some(&"example.com"));
-            assert_eq!(map.get(&Name("accept".into())), Some(&"text/html"));
-        }
-
-        #[test]
-        fn overwriting_value_uses_case_insensitive_match() {
-            let mut map = HashMap::new();
-            map.insert(Name("Host".into()), "one");
-            map.insert(Name("HOST".into()), "two");
-
-            // Expected behavior, although the [Parser] will generally check for existing keys
-            // and append the new value instead.
-            assert_eq!(map.len(), 1);
-            assert_eq!(map.get(&Name("host".into())), Some(&"two"));
-        }
-    }
-}
 
 /// HTTP method.
 /// Parse one from a string with respect to RFC9112 by using
@@ -231,7 +147,7 @@ impl Default for RequestLine {
 /// Header storage.
 /// Some well known headers have dedicated fields within this type.
 /// All others are stored in [Headers::other].
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Headers {
     /// Host header.
     ///
@@ -247,7 +163,7 @@ pub struct Headers {
     content_length: Option<i64>,
 
     /// All other headers are stored here.
-    pub other: HashMap<header::Name, Vec<header::Value>>,
+    pub other: HashMap<headers::Name, Vec<headers::Value>>,
 }
 
 /// A fully formed request header containing the request line and headers.
@@ -316,6 +232,8 @@ pub enum Error {
 }
 
 pub struct Parser {
+    pub request_line: Option<RequestLine>,
+    pub headers: Headers,
     /// Request bytes.
     /// All data received by [Parser::read_bytes] is stored here
     data: Vec<u8>,
@@ -325,8 +243,6 @@ pub struct Parser {
     pos: usize,
     /// Current state of the parser.
     state: State,
-    request_line: Option<RequestLine>,
-    headers: Headers,
     /// If the [Parser] returns an error,
     /// all further calls to parser methods return that same error.
     error: Option<Error>,
@@ -460,7 +376,7 @@ impl Parser {
             //
             // 1. "A client MUST send a Host header field in all HTTP/1.1 request messages."
             //    https://datatracker.ietf.org/doc/html/rfc9112#section-3.2-5
-            if state.other.get(header::HOST).is_none() {
+            if state.host.is_none() {
                 return Err(Error::MissingHost);
             }
             // TODO: Authority of request line target (if any) must match Host ^.
@@ -493,43 +409,43 @@ impl Parser {
         let split = split_field_line(&line.0)?;
         let split_name = &line[split[0].start..split[0].end];
         let split_value = &line[split[1].start..split[1].end];
+        let split_name_str = unsafe { std::str::from_utf8_unchecked(split_name) };
+        let split_value_str = unsafe { std::str::from_utf8_unchecked(split_value) };
 
         // Check for significant headers.
-        let s_unchecked =
-            |bytes: &[u8]| unsafe { std::str::from_utf8_unchecked(bytes) }.to_string();
-        let mut store_header = true;
-        if header::eq(HOST, split_name) {
-            // A server MUST respond with a 400 (Bad Request) status code to any HTTP/1.1 request
-            // message that lacks a Host header field and to any request message that contains more
-            // than one Host header field line or a Host header field with an invalid field value.
-            //
-            // https://www.rfc-editor.org/rfc/rfc9112.html#section-3.2-6
-            if state.host.is_some() {
-                return Err(Error::MultipleHostHeaders);
+        let mut store_header = false;
+        let name = match headers::lookup_well_known_header(split_name_str) {
+            Some(well_known_header) => headers::Name::Static(well_known_header),
+            None => headers::Name::Owned(split_name_str.to_string()),
+        };
+
+        match name.as_ref() {
+            headers::HOST => {
+                // A server MUST respond with a 400 (Bad Request) status code to any HTTP/1.1 request
+                // message that lacks a Host header field and to any request message that contains more
+                // than one Host header field line or a Host header field with an invalid field value.
+                //
+                // https://www.rfc-editor.org/rfc/rfc9112.html#section-3.2-6
+                if state.host.is_some() {
+                    return Err(Error::MultipleHostHeaders);
+                }
+                state.host = Some(split_value_str.to_string());
             }
-            state.host = Some(s_unchecked(split_name));
-            store_header = false;
-        } else if header::eq(CONTENT_LENGTH, split_name) {
-            let content_length: i64 = unsafe { std::str::from_utf8_unchecked(split_value) }
-                .parse()
-                .map_err(|_| Error::MalformedHeader)?;
-            state.content_length = Some(content_length);
-            store_header = false;
-        } else if header::eq(TRANSFER_ENCODING, split_name) {
-            state
-                .transfer_encoding
-                .push(unsafe { std::str::from_utf8_unchecked(split_value) }.to_string());
-            store_header = false;
+            headers::CONTENT_LENGTH => {
+                let content_length: i64 = split_value_str.parse() .map_err(|_| Error::MalformedHeader)?;
+                state.content_length = Some(content_length);
+            }
+            headers::TRANSFER_ENCODING => {
+                state
+                    .transfer_encoding
+                    .push(unsafe { std::str::from_utf8_unchecked(split_value) }.to_string());
+            }
+            _ => store_header = true
         }
 
         // All data is checked with is_ascii in read_data.
         if store_header {
-            let name_str = unsafe { std::str::from_utf8_unchecked(split_name) };
-            let value_str = unsafe { std::str::from_utf8_unchecked(split_value) };
-            let name_owned = name_str.to_string();
-            let value_owned = value_str.to_string();
-            let name = header::Name(name_owned);
-            let value = header::Value(value_owned);
+            let value = headers::Value(split_value_str.to_string());
             match state.other.entry(name) {
                 std::collections::hash_map::Entry::Occupied(mut oe) => oe.get_mut().push(value),
                 std::collections::hash_map::Entry::Vacant(ve) => {
@@ -644,12 +560,14 @@ mod header_parsing {
         }
         assert!(parser.headers.other.len() == 1);
 
-        let chunks_2 = [header::TRANSFER_ENCODING, ":"];
+        let chunks_2 = [headers::TRANSFER_ENCODING, ":"];
         for (i, chunk) in chunks_2.iter().enumerate() {
             parser.read_data(chunk.as_bytes()).unwrap();
         }
         parser.read_data("chunked\r\n".as_bytes()).unwrap();
-        // Should still be 1 because TRANSFER_ENCODING is a "well known" header and does not go in the header map.
+        // Transfer encoding is not stored in "other" map,
+        // it is a well known header with a dedicated field,
+        // so this should still be 1.
         assert!(parser.headers.other.len() == 1);
     }
 
@@ -731,7 +649,7 @@ mod header_parsing {
     fn parse_content_length() {
         let mut parser = Parser::default();
         parser.state = State::Headers;
-        let h1 = format!("{}: 300\r\n", header::CONTENT_LENGTH);
+        let h1 = format!("{}: 300\r\n", headers::CONTENT_LENGTH);
         if let Err(error) = parser.read_data(h1.as_bytes()) {
             panic!("unexpected error: {:?}", error);
         }
@@ -743,7 +661,7 @@ mod header_parsing {
     fn parse_transfer_encoding() {
         let mut parser = Parser::default();
         parser.state = State::Headers;
-        let h1 = format!("{}: chunked\r\n", header::TRANSFER_ENCODING);
+        let h1 = format!("{}: chunked\r\n", headers::TRANSFER_ENCODING);
         assert!(parser.read_data(h1.as_bytes()).is_ok());
         assert!(
             parser
